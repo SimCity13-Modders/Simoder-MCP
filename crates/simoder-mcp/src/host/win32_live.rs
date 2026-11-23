@@ -537,6 +537,9 @@ pub fn send_client_click(
 
 /// Post a smooth interpolated left-button drag across the verified client area (`steps` in `4..=40`).
 #[allow(clippy::too_many_arguments)]
+/// Start and end client coordinate pair for mouse drag actions.
+pub type DragCoordinates = ((i32, i32), (i32, i32));
+
 pub fn send_client_drag(
     pid: u32,
     hwnd_val: usize,
@@ -545,7 +548,7 @@ pub fn send_client_drag(
     end_x: f64,
     end_y: f64,
     steps: u32,
-) -> Result<((i32, i32), (i32, i32)), String> {
+) -> Result<DragCoordinates, String> {
     let win = verify_owned_hwnd(pid, hwnd_val)?;
     let (sx, sy) = norm_to_client_coords(&win, start_x, start_y);
     let (ex, ey) = norm_to_client_coords(&win, end_x, end_y);
@@ -670,7 +673,8 @@ fn capture_hwnd_png(win: &LiveWindowInfo) -> Result<String, String> {
     // SAFETY: `bits_ptr` points to `w * h * 4` bytes owned by live `hbm` until `_bm_guard` drops.
     let bgra = unsafe { std::slice::from_raw_parts(bits_ptr as *const u8, pixel_count * 4) };
     let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for px in bgra.chunks_exact(4) {
+    let (chunks, _) = bgra.as_chunks::<4>();
+    for px in chunks {
         rgb.push(px[2]);
         rgb.push(px[1]);
         rgb.push(px[0]);
