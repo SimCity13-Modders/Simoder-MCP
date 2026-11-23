@@ -1,0 +1,9 @@
+# Simoder-DevTools-MCP
+
+> Existing legacy MCP/DevBridge implementation ownership; no native-mod migration is implied.
+
+- [Build and ownership](README.md): prepared offline dependency restoration, component installation and validation limits.
+- [Package instructions](AGENTS.md): security and collaboration boundaries.
+- [Existing service guide](devtools/ai/README.md): protocol, broker and registration usage.
+- [Native session contracts](docs/native-session.md): current native session behavior.
+- [Runtime analysis](docs/runtime-analysis.md): existing diagnostic consumers.

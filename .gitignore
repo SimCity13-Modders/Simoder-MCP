@@ -1,0 +1,12 @@
+/build/
+/target/
+/.analysis/
+**/bin/
+**/obj/
+**/__pycache__/
+*.py[cod]
+/logs/
+/captures/
+*.pdb
+*.user
+/.vs/
