@@ -1,5 +1,8 @@
 # Simoder-DevTools-MCP
 
+[![Download Latest](https://img.shields.io/github/actions/workflow/status/SimCity13-Modders/Simoder-MCP/ci.yml?branch=main&label=Download%20Latest&logo=githubactions&logoColor=white)](https://nightly.link/SimCity13-Modders/Simoder-MCP/workflows/ci/main/simoder-mcp-windows-x86.zip)
+[![GitHub Stars](https://img.shields.io/github/stars/SimCity13-Modders/Simoder-MCP?logo=github)](https://github.com/SimCity13-Modders/Simoder-MCP/stargazers)
+
 Source owner of the optional game-owned native MCP DevTool mod (`crates/simoder-mcp` -> `simoder_mcp.dll`) for Simoder (`U4`/`U5`, `[Rust-6]`).
 
 Built in Rust (`edition = "2024"`), `simoder_mcp.dll` interacts with `Simoder` (`d3d9.dll`) across the Native Module Host Boundary (`ABI v2`: `SimoderModule_QueryV2`, `SimoderModule_PrepareV2`, `SimoderModule_AdmitV2`, `SimoderModule_QuiesceV2`, `SimoderModule_DrainV2`) without embedding or duplicating `Simoder`'s internal runtime crates and without spawning legacy standalone `.NET` child executables (`Simoder.DevBridge.exe` / `Simoder.McpServer.exe`).
