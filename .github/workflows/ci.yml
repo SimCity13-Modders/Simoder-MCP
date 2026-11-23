@@ -40,3 +40,34 @@ jobs:
       - name: Build 32-bit x86 release artifact
         run: |
           cargo build --release --target i686-pc-windows-msvc -p simoder-mcp
+          New-Item -ItemType Directory -Force -Path build/staged/simoder.devtools | Out-Null
+          Copy-Item target/i686-pc-windows-msvc/release/simoder_mcp.dll build/staged/simoder.devtools/simoder_mcp.dll
+          Copy-Item LICENSE build/staged/simoder.devtools/LICENSE.txt
+          Copy-Item THIRD_PARTY_NOTICES.md build/staged/simoder.devtools/THIRD_PARTY_NOTICES.md
+          $hash = (Get-FileHash build/staged/simoder.devtools/simoder_mcp.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          @"
+schemaVersion = 2
+format = "simoder.native-devtool"
+kind = "developer-mod"
+hostAbiVersion = 2
+
+[metadata]
+id = "simoder.devtools"
+name = "Simoder Developer Tools (Native MCP)"
+version = "0.2.0"
+author = "Simoder"
+description = "Optional game-owned native MCP DevTool mod (.dll) interacting with Simoder via ABI v2"
+
+[native]
+entry = "simoder_mcp.dll"
+sha256 = "$hash"
+abi = 2
+"@ | Set-Content -Path build/staged/simoder.devtools/mod.toml -Encoding utf8
+          "$hash *simoder_mcp.dll" | Set-Content -Path build/staged/SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload MCP mod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simoder-mcp-windows-x86
+          path: build/staged
+          if-no-files-found: error
