@@ -203,3 +203,71 @@ fn live_backend_dispatches_session_tools_and_builder_commands_through_js_bridge(
 
     assert!(calls.load(Ordering::Relaxed) >= 8);
 }
+
+#[test]
+fn mcp_tools_call_forwards_audit_logs_to_host_logger() {
+    use parking_lot::Mutex;
+    use simoder_mcp::{
+        McpAuthManager, McpServerEngine, NativeMcpLifecycle, SdHandle, SdHostApiV2, SdResult,
+        host::{HostLogFn, LiveHostBackend},
+    };
+
+    let logs: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs_clone = Arc::clone(&logs);
+    let logger: HostLogFn = Arc::new(move |level, source, msg| {
+        logs_clone
+            .lock()
+            .push((level.to_string(), source.to_string(), msg.to_string()));
+    });
+
+    let backend = Arc::new(
+        LiveHostBackend::with_js_bridge(std::process::id(), None, None).with_host_log(Some(logger)),
+    );
+    let lifecycle = Arc::new(NativeMcpLifecycle::new());
+    let owner = SdHandle { slot: 1, generation: 1 };
+    let host_api = SdHostApiV2::new(owner);
+    assert_eq!(lifecycle.prepare_v2(&host_api), SdResult::Ok);
+    assert_eq!(lifecycle.admit_v2(owner), SdResult::Ok);
+    let mut auth = McpAuthManager::new(1);
+    auth.register_full_session("sess-log", "client", "tok-log");
+    let engine = McpServerEngine::new(lifecycle, auth, backend);
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "simoder_get_service_info", "arguments": {} }
+    });
+    let resp = engine
+        .handle_jsonrpc(&req, "sess-log", "tok-log")
+        .unwrap()
+        .unwrap();
+    assert!(resp.to_string().contains("gamePid"));
+
+    let captured = logs.lock();
+    assert!(
+        captured
+            .iter()
+            .any(|(lvl, src, msg)| lvl == "info" && src == "simoder-mcp" && msg.contains("simoder_get_service_info")),
+        "expected MCP tools/call log entry, got: {captured:?}"
+    );
+    drop(captured);
+
+    let unknown_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "simoder_nonexistent_tool", "arguments": {} }
+    });
+    let _ = engine
+        .handle_jsonrpc(&unknown_req, "sess-log", "tok-log")
+        .unwrap();
+
+    let captured = logs.lock();
+    assert!(
+        captured
+            .iter()
+            .any(|(lvl, src, msg)| lvl == "warn" && src == "simoder-mcp" && msg.contains("simoder_nonexistent_tool")),
+        "expected MCP unknown tool warn log entry, got: {captured:?}"
+    );
+}

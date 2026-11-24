@@ -189,6 +189,16 @@ unsafe extern "system" {
         dw_length: usize,
     ) -> usize;
     fn GetLastError() -> u32;
+    fn CreateFileW(
+        lp_file_name: *const u16,
+        dw_desired_access: u32,
+        dw_share_mode: u32,
+        lp_security_attributes: *mut c_void,
+        dw_creation_disposition: u32,
+        dw_flags_and_attributes: u32,
+        h_template_file: Handle,
+    ) -> Handle;
+    fn GetConsoleMode(h_console_handle: Handle, lp_mode: *mut u32) -> i32;
 }
 
 type EnumWindowsProc = unsafe extern "system" fn(hwnd: Hwnd, lparam: isize) -> i32;
@@ -464,11 +474,94 @@ pub fn list_process_windows(target_pid: u32) -> Vec<LiveWindowInfo> {
     state.windows
 }
 
-/// Capture the largest visible non-console game window belonging to `pid` into base64-encoded PNG pixels.
-pub fn capture_process_window(pid: u32) -> Result<(LiveWindowInfo, String), String> {
-    let target = select_primary_window(pid)?;
-    let png_base64 = capture_hwnd_png(&target)?;
-    Ok((target, png_base64))
+/// Capture either the primary game window (`target = "auto"`) or `"Simoder Developer Console"`
+/// (`target = "console"`) owned by `pid` into base64-encoded PNG pixels.
+pub fn capture_process_window_for_target(
+    pid: u32,
+    target: &str,
+) -> Result<(LiveWindowInfo, String), String> {
+    let win = if target.eq_ignore_ascii_case("console") {
+        select_console_window(pid)?
+    } else {
+        select_primary_window(pid)?
+    };
+    let png_base64 = capture_hwnd_png(&win)?;
+    Ok((win, png_base64))
+}
+
+/// Select the visible `"Simoder Developer Console"` window owned by `pid`.
+pub fn select_console_window(pid: u32) -> Result<LiveWindowInfo, String> {
+    list_process_windows(pid)
+        .into_iter()
+        .find(|w| w.title.eq_ignore_ascii_case(DEV_CONSOLE_TITLE))
+        .ok_or_else(|| format!("no visible '{DEV_CONSOLE_TITLE}' window found for pid {pid}"))
+}
+
+/// Console output mode diagnostics read from the process's attached `CONOUT$` handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleModeDiagnostics {
+    /// True when `CONOUT$` is openable and `GetConsoleMode` succeeded.
+    pub attached: bool,
+    /// Raw Win32 console mode bitmask (`0` when detached).
+    pub mode: u32,
+    /// True when `ENABLE_PROCESSED_OUTPUT` (`0x0001`) is enabled.
+    pub processed_output: bool,
+    /// True when `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (`0x0004`) is enabled (ANSI colors).
+    pub virtual_terminal_processing: bool,
+}
+
+/// Inspect `CONOUT$` via `GetConsoleMode` to verify whether ANSI VT color processing is enabled.
+pub fn inspect_developer_console_mode() -> ConsoleModeDiagnostics {
+    const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
+    const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+    const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+    // SAFETY: `conout` is null-terminated UTF-16; returned handle is checked and closed below.
+    let handle = unsafe {
+        CreateFileW(
+            conout.as_ptr(),
+            GENERIC_READ_WRITE,
+            FILE_SHARE_READ_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle.is_null() || handle as usize == INVALID_HANDLE_VALUE_ADDR {
+        return ConsoleModeDiagnostics {
+            attached: false,
+            mode: 0,
+            processed_output: false,
+            virtual_terminal_processing: false,
+        };
+    }
+    let mut mode: u32 = 0;
+    // SAFETY: `handle` is a valid open `CONOUT$` handle and `mode` points to initialized stack storage.
+    let ok = unsafe { GetConsoleMode(handle, &mut mode) } != 0;
+    // SAFETY: `handle` was opened by `CreateFileW` above and is closed once here.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if !ok {
+        return ConsoleModeDiagnostics {
+            attached: false,
+            mode: 0,
+            processed_output: false,
+            virtual_terminal_processing: false,
+        };
+    }
+    ConsoleModeDiagnostics {
+        attached: true,
+        mode,
+        processed_output: (mode & ENABLE_PROCESSED_OUTPUT) != 0,
+        virtual_terminal_processing: (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0,
+    }
 }
 
 /// Select the primary visible `SimCity` window owned by `pid` (excluding the developer console).

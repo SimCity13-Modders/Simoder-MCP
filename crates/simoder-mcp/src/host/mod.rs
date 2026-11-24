@@ -27,6 +27,9 @@ use crate::types::{
 /// Synchronous callback executing a strict-ES5 JS function on the game's verified owning UI thread.
 pub type UiJsEvalFn = Arc<dyn Fn(&str, &str, u32) -> Result<String, String> + Send + Sync + 'static>;
 
+/// Callback forwarding MCP diagnostic events `(level, source, message)` into `Simoder`'s console logger.
+pub type HostLogFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync + 'static>;
+
 /// Decoupled mod tool descriptor registered in `Simoder`'s host registry (`ADR-004`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +155,9 @@ pub trait HostDispatchProvider: Send + Sync {
 
     /// Read `simoder_get_service_info` (`serverPid`, `gamePid`, `transport`).
     fn get_service_info(&self) -> JsonValue;
+
+    /// Forward an MCP tool or lifecycle diagnostic event into `Simoder`'s log pipeline.
+    fn log_event(&self, _level: &str, _source: &str, _message: &str) {}
 
     /// `Simoder-OpenSCP` extension: generate/inspect the retail debug-tools unlock DBPF overlay
     /// (`sc_properties::debug_tools::build_debug_tools_overlay`).

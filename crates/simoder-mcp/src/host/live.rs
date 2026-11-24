@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::live_session::{
     eval_router_op, execute_native_session, map_native_phase_to_stage,
 };
-use super::{ExternalModTool, HostDispatchProvider, StandardHostBackend, UiJsEvalFn};
+use super::{ExternalModTool, HostDispatchProvider, HostLogFn, StandardHostBackend, UiJsEvalFn};
 use crate::config::{DEFAULT_LOG_TAIL_LINES, MAX_LOG_TAIL_LINES, MAX_MEMORY_READ_BYTES};
 use crate::types::{
     AllowedKey, LaunchMode, McpToolError, NativeSessionRequest, RoadDrawType, StartupStage,
@@ -42,6 +42,7 @@ pub struct LiveHostBackend {
     pub(super) game_pid: u32,
     game_root: Option<PathBuf>,
     pub(super) js_bridge: Option<UiJsEvalFn>,
+    host_log: Option<HostLogFn>,
     fallback: StandardHostBackend,
     pub(super) session_mutex: Mutex<()>,
     capture_seq: AtomicU64,
@@ -64,11 +65,18 @@ impl LiveHostBackend {
             game_pid,
             game_root,
             js_bridge,
+            host_log: None,
             fallback: StandardHostBackend::new(game_pid),
             session_mutex: Mutex::new(()),
             capture_seq: AtomicU64::new(1),
             last_capture: Mutex::new(None),
         }
+    }
+
+    /// Attach an optional [`HostLogFn`] forwarding MCP events into `Simoder`'s console pipeline.
+    pub fn with_host_log(mut self, host_log: Option<HostLogFn>) -> Self {
+        self.host_log = host_log;
+        self
     }
 
     /// Borrow the underlying [`StandardHostBackend`] (for decoupled mod tool registration).
@@ -80,11 +88,12 @@ impl LiveHostBackend {
         self.game_root.as_ref().map(|root| root.join("simoder"))
     }
 
-    fn capture_live_window_impl(&self, _target: &str) -> Result<(JsonValue, String), McpToolError> {
+    fn capture_live_window_impl(&self, target: &str) -> Result<(JsonValue, String), McpToolError> {
         #[cfg(windows)]
         {
-            let (win, png_base64) = super::win32_live::capture_process_window(self.game_pid)
-                .map_err(McpToolError::public)?;
+            let (win, png_base64) =
+                super::win32_live::capture_process_window_for_target(self.game_pid, target)
+                    .map_err(McpToolError::public)?;
             let seq = self.capture_seq.fetch_add(1, Ordering::Relaxed);
             let capture_id = format!("live-cap-{}-{seq}", self.game_pid);
             let captured_at_utc = format_utc_now();
@@ -203,6 +212,12 @@ impl HostDispatchProvider for LiveHostBackend {
 
     fn export_game_code(&self) -> Result<JsonValue, McpToolError> {
         self.fallback.export_game_code()
+    }
+
+    fn log_event(&self, level: &str, source: &str, message: &str) {
+        if let Some(cb) = &self.host_log {
+            cb(level, source, message);
+        }
     }
 
     fn set_mod_enabled(&self, mod_id: &str, enabled: bool) -> Result<JsonValue, McpToolError> {
@@ -497,9 +512,14 @@ impl HostDispatchProvider for LiveHostBackend {
         let simoder_dir = root.join("simoder");
         let config_raw = fs::read_to_string(simoder_dir.join("config.toon")).ok();
         let state_raw = fs::read_to_string(simoder_dir.join("state.toon")).ok();
+        let region_mods_raw = fs::read_to_string(simoder_dir.join("region_mods.toon")).ok();
         let trust_raw = fs::read_to_string(simoder_dir.join("native_trust.toon")).ok();
         let mods_dir = root.join("mods");
         let mods = scan_mod_summaries(&mods_dir);
+        #[cfg(windows)]
+        let dev_console = Some(super::win32_live::inspect_developer_console_mode());
+        #[cfg(not(windows))]
+        let dev_console: Option<JsonValue> = None;
 
         Ok(json!({
             "result": {
@@ -514,7 +534,9 @@ impl HostDispatchProvider for LiveHostBackend {
                     "discoveredMods": mods,
                     "configToon": config_raw,
                     "stateToon": state_raw,
+                    "regionModsToon": region_mods_raw,
                     "nativeTrustToon": trust_raw,
+                    "developerConsole": dev_console,
                 }
             }
         }))

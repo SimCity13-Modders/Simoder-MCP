@@ -883,6 +883,8 @@
                     reloadGen: uiHost.reloadGen,
                     lastPhase: uiHost.lastPhase,
                     queuedEvents: uiHost.events ? uiHost.events.length : 0,
+                    consoleLogHooked: !!uiHost.consoleLogHooked,
+                    clientBridgeHooked: !!uiHost.clientBridgeHooked,
                     activeRegionContext: uiHost.activeRegionContext || null
                 } : null,
                 stylesInjected: !!styleEl,

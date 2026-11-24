@@ -261,17 +261,41 @@ impl McpServerEngine {
                 .lock()
                 .authorize_call(session_id, raw_token, &req_grant)
             {
+                self.host.log_event(
+                    "warn",
+                    "simoder-mcp",
+                    &format!("tools/call '{tool_name}' denied: {auth_err}"),
+                );
                 return CallToolResult::error(tool_name, &McpToolError::public(auth_err.to_string()));
             }
             return match builtin.execute(arguments, self.host.as_ref()) {
-                Ok(ok_res) => ok_res,
-                Err(tool_err) => CallToolResult::error(tool_name, &tool_err),
+                Ok(ok_res) => {
+                    self.host.log_event(
+                        "info",
+                        "simoder-mcp",
+                        &format!("tools/call '{tool_name}' -> ok"),
+                    );
+                    ok_res
+                }
+                Err(tool_err) => {
+                    self.host.log_event(
+                        "warn",
+                        "simoder-mcp",
+                        &format!("tools/call '{tool_name}' -> error: {tool_err:?}"),
+                    );
+                    CallToolResult::error(tool_name, &tool_err)
+                }
             };
         }
 
         // 2. Otherwise check decoupled external mod tools registered in the host (`ADR-004`).
         let ext_tools = self.host.list_external_mod_tools();
         let Some(ext) = ext_tools.iter().find(|t| t.definition.name == tool_name) else {
+            self.host.log_event(
+                "warn",
+                "simoder-mcp",
+                &format!("tools/call '{tool_name}' -> unknown tool"),
+            );
             return CallToolResult::error(
                 tool_name,
                 &McpToolError::public(format!("unknown or unregistered tool '{tool_name}'")),
@@ -282,11 +306,30 @@ impl McpServerEngine {
             .lock()
             .authorize_call(session_id, raw_token, &ext.required_grants)
         {
+            self.host.log_event(
+                "warn",
+                "simoder-mcp",
+                &format!("tools/call '{tool_name}' denied: {auth_err}"),
+            );
             return CallToolResult::error(tool_name, &McpToolError::public(auth_err.to_string()));
         }
         match self.host.invoke_external_mod_tool(tool_name, arguments) {
-            Ok(payload) => CallToolResult::success(payload),
-            Err(tool_err) => CallToolResult::error(tool_name, &tool_err),
+            Ok(payload) => {
+                self.host.log_event(
+                    "info",
+                    "simoder-mcp",
+                    &format!("tools/call '{tool_name}' -> ok"),
+                );
+                CallToolResult::success(payload)
+            }
+            Err(tool_err) => {
+                self.host.log_event(
+                    "warn",
+                    "simoder-mcp",
+                    &format!("tools/call '{tool_name}' -> error: {tool_err:?}"),
+                );
+                CallToolResult::error(tool_name, &tool_err)
+            }
         }
     }
 }
