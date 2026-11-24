@@ -7,6 +7,7 @@ pub mod backend;
 pub mod live;
 mod live_builder;
 mod live_session;
+mod live_util;
 pub mod openscp;
 #[cfg(windows)]
 mod win32_live;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 pub use backend::*;
 pub use live::*;
+pub use live_util::format_utc_now;
 pub use openscp::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -47,6 +49,23 @@ pub struct ExternalModTool {
 /// Callback handler executing a mod-registered tool on the host.
 pub type ExternalModToolHandler =
     Arc<dyn Fn(&JsonValue) -> Result<JsonValue, McpToolError> + Send + Sync + 'static>;
+
+/// Callback listing active mod-registered tools from `Simoder`'s host registry (`ABI v2`, `version >= 3`).
+pub type HostExternalToolsListFn =
+    Arc<dyn Fn() -> Vec<ExternalModTool> + Send + Sync + 'static>;
+
+/// Callback invoking one mod-registered tool through `Simoder`'s host registry (`ABI v2`, `version >= 3`).
+pub type HostExternalToolInvokeFn =
+    Arc<dyn Fn(&str, &JsonValue, &[String]) -> Result<JsonValue, McpToolError> + Send + Sync + 'static>;
+
+/// Host-bound bridge for discovering and invoking decoupled mod tools registered in `Simoder`.
+#[derive(Clone)]
+pub struct HostExternalToolsBridge {
+    /// Lists active mod tools from `Simoder`.
+    pub list_tools: HostExternalToolsListFn,
+    /// Invokes a named mod tool on `Simoder`.
+    pub invoke_tool: HostExternalToolInvokeFn,
+}
 
 /// Record of a backend call captured for compatibility and provenance verification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +139,17 @@ pub trait HostDispatchProvider: Send + Sync {
         capture_id: &str,
         normalized_x: f64,
         normalized_y: f64,
+    ) -> Result<JsonValue, McpToolError>;
+
+    /// Send a capture-bound normalized left-button drag (`0.0..=1.0`).
+    fn drag(
+        &self,
+        capture_id: &str,
+        start_x: f64,
+        start_y: f64,
+        end_x: f64,
+        end_y: f64,
+        steps: u32,
     ) -> Result<JsonValue, McpToolError>;
 
     /// Send one allowlisted key (`Escape`, `Enter`, `Space`) to an allowlisted window.
@@ -255,10 +285,12 @@ pub trait HostDispatchProvider: Send + Sync {
     /// List currently active decoupled mod extension tools registered in `Simoder`'s `HostToolRegistry`.
     fn list_external_mod_tools(&self) -> Vec<ExternalModTool>;
 
-    /// Invoke a decoupled mod extension tool by its canonical namespaced name (`"<mod_id>.<tool_name>"`).
+    /// Invoke a decoupled mod extension tool by its canonical namespaced name (`"<mod_id>.<tool_name>"`)
+    /// with the caller's verified permission grants.
     fn invoke_external_mod_tool(
         &self,
         tool_name: &str,
         arguments: &JsonValue,
+        granted: &[String],
     ) -> Result<JsonValue, McpToolError>;
 }

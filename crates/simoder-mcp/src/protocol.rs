@@ -313,7 +313,10 @@ impl McpServerEngine {
             );
             return CallToolResult::error(tool_name, &McpToolError::public(auth_err.to_string()));
         }
-        match self.host.invoke_external_mod_tool(tool_name, arguments) {
+        match self
+            .host
+            .invoke_external_mod_tool(tool_name, arguments, &ext.required_grants)
+        {
             Ok(payload) => {
                 self.host.log_event(
                     "info",

@@ -159,7 +159,7 @@ impl SdHostApiV2 {
 pub struct SdSemanticHostApiV2 {
     /// Exact struct byte size (`>= 12`/`16` on `i686`, `>= 16`/`24` on `x86_64`).
     pub size: u32,
-    /// Schema version (`1` or `2`).
+    /// Schema version (`1`, `2`, or `3`).
     pub version: u32,
     /// Owning-thread JS evaluation callback (`(script_fn, arg_json) -> Result<String, String>`).
     pub eval_ui_js: extern "C" fn(
@@ -180,110 +180,23 @@ pub struct SdSemanticHostApiV2 {
         msg_ptr: *const u8,
         msg_len: usize,
     ) -> u32,
+    /// Optional v3 host mod-tool listing callback (`(out_buf, out_cap, out_len) -> SdResult`).
+    pub list_mod_tools: extern "C" fn(out_buf: *mut u8, out_cap: usize, out_len: *mut usize) -> u32,
+    /// Optional v3 host mod-tool invocation callback with explicit caller grants.
+    pub invoke_mod_tool: extern "C" fn(
+        name_ptr: *const u8,
+        name_len: usize,
+        args_ptr: *const u8,
+        args_len: usize,
+        grants_ptr: *const u8,
+        grants_len: usize,
+        out_buf: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> u32,
 }
 
-static HOST_SEMANTIC_API_PTR: AtomicUsize = AtomicUsize::new(0);
-
-/// Build a safe host-bound [`crate::host::UiJsEvalFn`] closure when `Simoder` provided a valid
-/// `SdSemanticHostApiV2` pointer in `SimoderModule_PrepareV2`.
-#[cfg(not(test))]
-#[allow(unsafe_code)]
-fn host_eval_ui_js_bridge() -> Option<crate::host::UiJsEvalFn> {
-    let raw_ptr = HOST_SEMANTIC_API_PTR.load(Ordering::Acquire);
-    if raw_ptr == 0 {
-        return None;
-    }
-    // SAFETY: `Simoder` keeps `SEMANTIC_HOST_API_V2` static for the process lifetime while this DLL is admitted.
-    let size_and_ver = unsafe { *(raw_ptr as *const SdHeader) };
-    const V1_MIN_SIZE: usize =
-        std::mem::offset_of!(SdSemanticHostApiV2, eval_ui_js) + size_of::<usize>();
-    if (size_and_ver.size as usize) < V1_MIN_SIZE || size_and_ver.version < 1 {
-        return None;
-    }
-    // SAFETY: `size_and_ver.size >= V1_MIN_SIZE` guarantees `eval_ui_js` lies within the host struct on both 32-bit and 64-bit targets.
-    let eval_fn = unsafe {
-        std::ptr::addr_of!((*(raw_ptr as *const SdSemanticHostApiV2)).eval_ui_js).read()
-    };
-    Some(Arc::new(move |script: &str, arg: &str, timeout_ms: u32| {
-        let mut cap = 64 * 1024;
-        let mut buf = vec![0u8; cap];
-        let mut out_len: usize = 0;
-        let mut code = (eval_fn)(
-            script.as_ptr(),
-            script.len(),
-            if arg.is_empty() {
-                std::ptr::null()
-            } else {
-                arg.as_ptr()
-            },
-            arg.len(),
-            buf.as_mut_ptr(),
-            cap,
-            &mut out_len,
-            timeout_ms,
-        );
-        if code == SdResult::BufferSmall as u32 && out_len > cap && out_len <= 4 * 1024 * 1024 {
-            cap = out_len;
-            buf.resize(cap, 0);
-            code = (eval_fn)(
-                script.as_ptr(),
-                script.len(),
-                if arg.is_empty() {
-                    std::ptr::null()
-                } else {
-                    arg.as_ptr()
-                },
-                arg.len(),
-                buf.as_mut_ptr(),
-                cap,
-                &mut out_len,
-                timeout_ms,
-            );
-        }
-        let actual_len = out_len.min(buf.len());
-        let text = String::from_utf8_lossy(&buf[..actual_len]).into_owned();
-        if code == SdResult::Ok as u32 {
-            Ok(text)
-        } else if text.is_empty() {
-            Err(format!("Host EAWebKit bridge failed (SdResult={code})"))
-        } else {
-            Err(text)
-        }
-    }))
-}
-
-#[cfg(not(test))]
-#[allow(unsafe_code)]
-fn host_log_bridge() -> Option<crate::host::HostLogFn> {
-    let raw_ptr = HOST_SEMANTIC_API_PTR.load(Ordering::Acquire);
-    if raw_ptr == 0 {
-        return None;
-    }
-    // SAFETY: `Simoder` keeps `SEMANTIC_HOST_API_V2` static for the process lifetime while this DLL is admitted.
-    let size_and_ver = unsafe { *(raw_ptr as *const SdHeader) };
-    if (size_and_ver.size as usize) < size_of::<SdSemanticHostApiV2>() || size_and_ver.version < 2 {
-        return None;
-    }
-    // SAFETY: Verified v2 table size covers `SdSemanticHostApiV2`.
-    let table = unsafe { *(raw_ptr as *const SdSemanticHostApiV2) };
-    let log_fn = table.log_message;
-    Some(Arc::new(move |level: &str, source: &str, message: &str| {
-        let lvl = match level {
-            "trace" => 0,
-            "debug" => 1,
-            "info" => 2,
-            "warn" | "warning" => 3,
-            _ => 4,
-        };
-        let _ = (log_fn)(
-            lvl,
-            source.as_ptr(),
-            source.len(),
-            message.as_ptr(),
-            message.len(),
-        );
-    }))
-}
+pub(crate) static HOST_SEMANTIC_API_PTR: AtomicUsize = AtomicUsize::new(0);
 
 /// Module contract identity descriptor populated by `SimoderModule_QueryV2` (`SdModuleDescriptorV2`, 56 bytes).
 #[repr(C)]
@@ -662,13 +575,15 @@ fn start_global_http_server_on_admit() -> SdResult {
         "antigravity-http-client",
         &token,
     );
+    let log_bridge = crate::abi_bridges::host_log_bridge();
     let backend = Arc::new(
         LiveHostBackend::with_js_bridge(
             std::process::id(),
             game_root,
-            host_eval_ui_js_bridge(),
+            crate::abi_bridges::host_eval_ui_js_bridge(),
         )
-        .with_host_log(host_log_bridge()),
+        .with_host_log(log_bridge.clone())
+        .with_external_tools(crate::abi_bridges::host_external_tools_bridge(log_bridge)),
     );
     let engine = Arc::new(McpServerEngine::new(lifecycle, auth, backend));
     let bind = std::env::var(ENV_MCP_HTTP_BIND)

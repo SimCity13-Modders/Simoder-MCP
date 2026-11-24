@@ -425,6 +425,35 @@ impl HostDispatchProvider for StandardHostBackend {
         )
     }
 
+    fn drag(
+        &self,
+        capture_id: &str,
+        start_x: f64,
+        start_y: f64,
+        end_x: f64,
+        end_y: f64,
+        steps: u32,
+    ) -> Result<JsonValue, McpToolError> {
+        self.record_and_check(
+            "Drag",
+            json!({
+                "captureId": capture_id,
+                "startX": start_x,
+                "startY": start_y,
+                "endX": end_x,
+                "endY": end_y,
+                "steps": steps
+            }),
+            json!({
+                "result": {
+                    "accepted": true,
+                    "steps": steps,
+                    "mechanism": "synthetic-input-path"
+                }
+            }),
+        )
+    }
+
     fn send_key(&self, target: &str, key: AllowedKey) -> Result<JsonValue, McpToolError> {
         let key_str: &'static str = key.into();
         self.record_and_check(
@@ -859,6 +888,7 @@ impl HostDispatchProvider for StandardHostBackend {
         &self,
         tool_name: &str,
         arguments: &JsonValue,
+        _granted: &[String],
     ) -> Result<JsonValue, McpToolError> {
         let active = self.active_mod_generations.lock();
         let tools = self.external_tools.lock();

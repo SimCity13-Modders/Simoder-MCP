@@ -75,6 +75,22 @@ impl BuiltinToolId {
                 json!({"type": "object", "properties": {"templateId": {"type": "integer"}, "regionName": {"type": "string"}}, "required": ["templateId", "regionName"]}),
                 ToolAnnotations::mutating(false, false),
             ),
+            Self::SimCityDrag => (
+                "Drag the left mouse button between two normalized viewport coordinates in an allowlisted window using an exact capture_id no older than ten seconds.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "captureId": {"type": "string"},
+                        "startX": {"type": "number"},
+                        "startY": {"type": "number"},
+                        "endX": {"type": "number"},
+                        "endY": {"type": "number"},
+                        "steps": {"type": "integer", "default": 12, "minimum": 4, "maximum": 40}
+                    },
+                    "required": ["captureId", "startX", "startY", "endX", "endY"]
+                }),
+                ToolAnnotations::mutating(false, false),
+            ),
             Self::SimCityEnterGame => (
                 "Enter the game using its native RequestUpdaterData UPDATE_COMPLETE command and wait for menu/city readiness.",
                 json!({"type": "object", "properties": {"timeoutSeconds": {"type": "integer", "default": 60}}}),

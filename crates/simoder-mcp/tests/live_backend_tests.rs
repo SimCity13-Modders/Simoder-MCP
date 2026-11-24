@@ -271,3 +271,81 @@ fn mcp_tools_call_forwards_audit_logs_to_host_logger() {
         "expected MCP unknown tool warn log entry, got: {captured:?}"
     );
 }
+
+#[test]
+fn live_backend_discovers_and_invokes_host_external_mod_tools() {
+    use simoder_mcp::{
+        ExternalModTool, HostExternalToolsBridge, McpAuthManager, McpServerEngine,
+        NativeMcpLifecycle, SD_U2A_HOST_VERSION, SdHandle, SdHostApiV2, SdModuleDescriptorV2,
+        SdResult, ToolAnnotations, ToolDefinition,
+    };
+
+    let tool = ExternalModTool {
+        owner_mod_id: "simoder.ui_inspector".to_string(),
+        owner_generation: 1,
+        definition: ToolDefinition {
+            name: "simoder.ui_inspector.get_selection".to_string(),
+            description: "Read inspected UI element".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            output_schema: None,
+            annotations: ToolAnnotations::read_only(true),
+        },
+        required_grants: vec!["session.read".to_string()],
+    };
+    let tool_clone = tool.clone();
+    let bridge = HostExternalToolsBridge {
+        list_tools: Arc::new(move || vec![tool_clone.clone()]),
+        invoke_tool: Arc::new(|name, args, granted| {
+            assert!(
+                granted.iter().any(|g| g == "session.read"),
+                "expected 'session.read' grant forwarded to host bridge, got: {granted:?}"
+            );
+            Ok(serde_json::json!({
+                "invoked": name,
+                "args": args,
+                "granted": granted,
+                "selector": "#btn-play"
+            }))
+        }),
+    };
+
+    let backend = Arc::new(LiveHostBackend::new(std::process::id(), None).with_external_tools(Some(bridge)));
+    let lifecycle = Arc::new(NativeMcpLifecycle::new());
+    let mut desc = SdModuleDescriptorV2::new_for_query();
+    assert_eq!(lifecycle.query_v2(SD_U2A_HOST_VERSION, &mut desc), SdResult::Ok);
+    let owner = SdHandle { slot: 1, generation: 1 };
+    let host = SdHostApiV2::new(owner);
+    assert_eq!(lifecycle.prepare_v2(&host), SdResult::Ok);
+    assert_eq!(lifecycle.admit_v2(owner), SdResult::Ok);
+
+    let mut auth = McpAuthManager::new(1);
+    auth.register_full_session("sess-ext", "client", "tok-ext");
+    let engine = McpServerEngine::new(lifecycle, auth, backend);
+
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+    let list_resp = engine
+        .handle_jsonrpc(&list_req, "sess-ext", "tok-ext")
+        .unwrap()
+        .unwrap();
+    assert!(list_resp.to_string().contains("simoder.ui_inspector.get_selection"));
+
+    let call_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "simoder.ui_inspector.get_selection",
+            "arguments": {"copyToClipboard": false}
+        }
+    });
+    let call_resp = engine
+        .handle_jsonrpc(&call_req, "sess-ext", "tok-ext")
+        .unwrap()
+        .unwrap();
+    assert!(call_resp.to_string().contains("#btn-play"));
+}

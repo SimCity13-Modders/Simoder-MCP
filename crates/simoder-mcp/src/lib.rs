@@ -8,6 +8,8 @@
 //! `Simoder`'s internal runtime crates (`ADR-001`..`ADR-005`).
 
 pub mod abi;
+#[cfg(not(test))]
+pub(crate) mod abi_bridges;
 pub mod auth;
 pub mod catalog;
 pub mod config;

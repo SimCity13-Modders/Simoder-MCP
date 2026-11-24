@@ -6,10 +6,10 @@
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::{Value as JsonValue, json};
@@ -18,14 +18,18 @@ use sha2::{Digest, Sha256};
 use super::live_session::{
     eval_router_op, execute_native_session, map_native_phase_to_stage,
 };
-use super::{ExternalModTool, HostDispatchProvider, HostLogFn, StandardHostBackend, UiJsEvalFn};
+use super::live_util::{format_utc_now, parse_hex_address, scan_mod_summaries};
+use super::{
+    ExternalModTool, HostDispatchProvider, HostExternalToolsBridge, HostLogFn, StandardHostBackend,
+    UiJsEvalFn,
+};
 use crate::config::{DEFAULT_LOG_TAIL_LINES, MAX_LOG_TAIL_LINES, MAX_MEMORY_READ_BYTES};
 use crate::types::{
     AllowedKey, LaunchMode, McpToolError, NativeSessionRequest, RoadDrawType, StartupStage,
     ZoneType,
 };
 
-const CAPTURE_FRESHNESS_LIMIT: Duration = Duration::from_secs(10);
+const CAPTURE_FRESHNESS_LIMIT: Duration = Duration::from_secs(30);
 pub(super) const ROUTER_TIMEOUT_MS: u32 = 8_000;
 
 struct CachedCapture {
@@ -43,6 +47,7 @@ pub struct LiveHostBackend {
     game_root: Option<PathBuf>,
     pub(super) js_bridge: Option<UiJsEvalFn>,
     host_log: Option<HostLogFn>,
+    external_tools: Option<HostExternalToolsBridge>,
     fallback: StandardHostBackend,
     pub(super) session_mutex: Mutex<()>,
     capture_seq: AtomicU64,
@@ -66,6 +71,7 @@ impl LiveHostBackend {
             game_root,
             js_bridge,
             host_log: None,
+            external_tools: None,
             fallback: StandardHostBackend::new(game_pid),
             session_mutex: Mutex::new(()),
             capture_seq: AtomicU64::new(1),
@@ -76,6 +82,15 @@ impl LiveHostBackend {
     /// Attach an optional [`HostLogFn`] forwarding MCP events into `Simoder`'s console pipeline.
     pub fn with_host_log(mut self, host_log: Option<HostLogFn>) -> Self {
         self.host_log = host_log;
+        self
+    }
+
+    /// Attach an optional [`HostExternalToolsBridge`] for `Simoder` host-registered mod tools.
+    pub fn with_external_tools(
+        mut self,
+        external_tools: Option<HostExternalToolsBridge>,
+    ) -> Self {
+        self.external_tools = external_tools;
         self
     }
 
@@ -387,6 +402,79 @@ impl HostDispatchProvider for LiveHostBackend {
         }
     }
 
+    fn drag(
+        &self,
+        capture_id: &str,
+        start_x: f64,
+        start_y: f64,
+        end_x: f64,
+        end_y: f64,
+        steps: u32,
+    ) -> Result<JsonValue, McpToolError> {
+        for val in [start_x, start_y, end_x, end_y] {
+            if !val.is_finite() || !(0.0..=1.0).contains(&val) {
+                return Err(McpToolError::public(
+                    "startX, startY, endX, and endY must be finite values within 0.0..=1.0",
+                ));
+            }
+        }
+
+        let hwnd = {
+            let guard = self.last_capture.lock();
+            let Some(cap) = guard.as_ref() else {
+                return Err(McpToolError::public(
+                    "capture_id unknown: call simcity_capture_window before dragging",
+                ));
+            };
+            if cap.capture_id != capture_id {
+                return Err(McpToolError::public(format!(
+                    "stale or mismatched captureId '{capture_id}' (latest is '{}')",
+                    cap.capture_id
+                )));
+            }
+            if cap.captured_at.elapsed() > CAPTURE_FRESHNESS_LIMIT {
+                return Err(McpToolError::public(format!(
+                    "captureId '{capture_id}' expired (>10s old); capture again before dragging"
+                )));
+            }
+            cap.hwnd
+        };
+
+        #[cfg(windows)]
+        {
+            let clamped_steps = steps.clamp(4, 40);
+            let ((sx, sy), (ex, ey)) = super::win32_live::send_client_drag(
+                self.game_pid,
+                hwnd,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                clamped_steps,
+            )
+            .map_err(McpToolError::public)?;
+            Ok(json!({
+                "result": {
+                    "accepted": true,
+                    "captureId": capture_id,
+                    "startClientX": sx,
+                    "startClientY": sy,
+                    "endClientX": ex,
+                    "endClientY": ey,
+                    "steps": clamped_steps,
+                    "mechanism": "win32-postmessage-drag"
+                }
+            }))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (hwnd, steps);
+            Err(McpToolError::public(
+                "window drag injection is only supported on Windows hosts",
+            ))
+        }
+    }
+
     fn send_key(&self, _target: &str, key: AllowedKey) -> Result<JsonValue, McpToolError> {
         #[cfg(windows)]
         {
@@ -679,7 +767,13 @@ impl HostDispatchProvider for LiveHostBackend {
     }
 
     fn list_external_mod_tools(&self) -> Vec<ExternalModTool> {
-        self.fallback.list_external_mod_tools()
+        let mut tools = self
+            .external_tools
+            .as_ref()
+            .map(|b| (b.list_tools)())
+            .unwrap_or_default();
+        tools.extend(self.fallback.list_external_mod_tools());
+        tools
     }
 
     fn inspect_ui_tree(
@@ -709,109 +803,22 @@ impl HostDispatchProvider for LiveHostBackend {
         &self,
         tool_name: &str,
         arguments: &JsonValue,
+        granted: &[String],
     ) -> Result<JsonValue, McpToolError> {
-        self.fallback.invoke_external_mod_tool(tool_name, arguments)
-    }
-}
-
-fn parse_hex_address(raw: &str) -> Result<usize, McpToolError> {
-    let trimmed = raw.trim();
-    let hex_digits = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    usize::from_str_radix(hex_digits, 16)
-        .map_err(|e| McpToolError::public(format!("invalid hexadecimal address '{raw}': {e}")))
-}
-
-fn scan_mod_summaries(mods_dir: &Path) -> Vec<JsonValue> {
-    let Ok(entries) = fs::read_dir(mods_dir) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    dirs.sort();
-    let mut out = Vec::new();
-    for dir in dirs {
-        if !dir.is_dir() {
-            continue;
+        if self
+            .fallback
+            .list_external_mod_tools()
+            .iter()
+            .any(|t| t.definition.name == tool_name)
+        {
+            return self
+                .fallback
+                .invoke_external_mod_tool(tool_name, arguments, granted);
         }
-        let dir_name = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        if dir_name.eq_ignore_ascii_case("cache") {
-            continue;
+        if let Some(bridge) = &self.external_tools {
+            return (bridge.invoke_tool)(tool_name, arguments, granted);
         }
-        let manifest_path = dir.join("mod.toml");
-        let manifest_present = manifest_path.is_file();
-        let (mod_id, version, has_scripts, has_native) = if let Ok(raw) = fs::read_to_string(&manifest_path) {
-            let mut id = None;
-            let mut ver = None;
-            let mut section = "";
-            let mut scripts = false;
-            let mut native = false;
-            for line in raw.lines() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with('#') {
-                    continue;
-                }
-                if t.starts_with('[') && t.ends_with(']') {
-                    section = t;
-                    if t == "[scripts]" {
-                        scripts = true;
-                    } else if t == "[native]" {
-                        native = true;
-                    }
-                    continue;
-                }
-                if section == "[metadata]"
-                    && let Some((k, v)) = t.split_once('=')
-                {
-                    let val = v.trim().trim_matches('"').trim_matches('\'');
-                    match k.trim() {
-                        "id" => id = Some(val.to_string()),
-                        "version" => ver = Some(val.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-            (id.unwrap_or_else(|| dir_name.clone()), ver, scripts, native)
-        } else {
-            (dir_name.clone(), None, false, false)
-        };
-        out.push(json!({
-            "directory": dir_name,
-            "id": mod_id,
-            "version": version,
-            "hasManifest": manifest_present,
-            "hasScripts": has_scripts,
-            "hasNative": has_native,
-        }));
+        self.fallback
+            .invoke_external_mod_tool(tool_name, arguments, granted)
     }
-    out
-}
-
-/// Format the current UTC wall clock as an ISO-8601 timestamp (`YYYY-MM-DDTHH:MM:SS+00:00`) using Howard Hinnant's civil calendar conversion.
-pub fn format_utc_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_i64, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let hour = rem / 3600;
-    let minute = (rem % 3600) / 60;
-    let second = rem % 60;
-
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if month <= 2 { 1 } else { 0 };
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00")
 }

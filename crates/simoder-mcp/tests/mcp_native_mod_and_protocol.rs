@@ -155,18 +155,19 @@ fn u4_issue2_and_issue4_catalog_openscp_extensions_decoupled_mod_tools_and_error
         auth.grant_permission("sess-1", "mod.traffic.read");
     });
 
-    // 2. tools/list returns all 41 built-in tools + 1 decoupled mod tool = 42 tools sorted alphabetically.
+    // 2. tools/list returns all 42 built-in tools + 1 decoupled mod tool = 43 tools sorted alphabetically.
     let list_resp = engine
         .handle_jsonrpc(
-            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            &json!({"jsonrpc": "2.0", "id": 2, "method":"tools/list","params":{}}),
             "sess-1",
             "secret-token-1",
         )
         .unwrap()
         .unwrap();
     let tools = list_resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(BuiltinToolId::VARIANTS.len(), 41);
+    assert_eq!(BuiltinToolId::VARIANTS.len(), 42);
     assert_eq!(tools.len(), BuiltinToolId::VARIANTS.len() + 1);
+    assert!(tools.iter().any(|t| t["name"] == "simcity_drag"));
     assert!(tools.iter().any(|t| t["name"] == "simoder_unlock_debug_tools"));
     assert!(tools.iter().any(|t| t["name"] == "simoder_get_bridge_telemetry"));
     assert!(tools.iter().any(|t| t["name"] == "simoder_inspect_sldelta"));

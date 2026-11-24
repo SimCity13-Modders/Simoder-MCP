@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Built-in MCP tool catalog (34 simulation/session/builder tools + 4 `Simoder-OpenSCP` & telemetry tools),
+//! Built-in MCP tool catalog (`42` simulation, session, builder, UI, `Simoder-OpenSCP`, and telemetry tools),
 //! JSON schemas, required permission grants, and strict argument validators (`Simoder-DevTools-MCP#2`).
 
 pub mod definitions;
@@ -63,6 +63,9 @@ pub enum BuiltinToolId {
     /// `simcity_create_sandbox_region`
     #[strum(to_string = "simcity_create_sandbox_region")]
     SimCityCreateSandboxRegion,
+    /// `simcity_drag`
+    #[strum(to_string = "simcity_drag")]
+    SimCityDrag,
     /// `simcity_enter_game`
     #[strum(to_string = "simcity_enter_game")]
     SimCityEnterGame,
@@ -213,6 +216,7 @@ impl BuiltinToolId {
 
             Self::SimCityCaptureWindow
             | Self::SimCityClick
+            | Self::SimCityDrag
             | Self::SimCitySendKey
             | Self::SimCityMoveCamera => McpGrant::UiInput,
 
@@ -457,6 +461,20 @@ impl BuiltinToolId {
                 let nx = require_f64(args, "normalizedX")?;
                 let ny = require_f64(args, "normalizedY")?;
                 host.click(capture_id, nx, ny).map(CallToolResult::success)
+            }
+            Self::SimCityDrag => {
+                let capture_id = require_str(args, "captureId")?;
+                let sx = require_f64(args, "startX")?;
+                let sy = require_f64(args, "startY")?;
+                let ex = require_f64(args, "endX")?;
+                let ey = require_f64(args, "endY")?;
+                let steps = args
+                    .get("steps")
+                    .and_then(JsonValue::as_i64)
+                    .unwrap_or(12)
+                    .clamp(4, 40) as u32;
+                host.drag(capture_id, sx, sy, ex, ey, steps)
+                    .map(CallToolResult::success)
             }
             Self::SimCitySendKey => {
                 let target = require_str(args, "target")?;
